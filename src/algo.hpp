@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "find2_index_approx.hpp"
@@ -486,22 +487,32 @@ inline void computeMappability(TIndex & index, TText const & text, TContainer & 
     resetLimits(c, params.length, chromCumLengths);
 }
 
+// One edit-distance alignment: where it starts, and how many text bases it spans.
+template <typename TLocation>
+struct EditMatch
+{
+    TLocation location;
+    uint32_t length;
+};
+
 // Edit-distance mappability. The Hamming algorithm extends one shared overlap
 // across several adjacent k-mers; an indel changes the matched length, so that
 // extension does not apply. Each k-mer is searched with an optimum search scheme
 // for Levenshtein distance. Several alignments can share a start position, so the
 // frequency is the number of distinct start positions (forward strand plus reverse
-// complement), not the sum of suffix-array interval sizes.
+// complement), not the sum of suffix-array interval sizes. With nonOverlapping,
+// overlapping alignments of the same site count once.
 template <unsigned errors, typename TIndex, typename TNeedle, typename TLocation>
-inline void collectEditOccurrences(TIndex & index, TNeedle const & needle, std::vector<TLocation> & occurrences)
+inline void collectEditMatches(TIndex & index, TNeedle const & needle, std::vector<EditMatch<TLocation>> & matches)
 {
-    occurrences.clear();
+    matches.clear();
 
     using TBiIter = Iter<TIndex, VSTree<TopDown<> > >;
-    auto delegate = [&occurrences](TBiIter it, TNeedle const & /*needle*/, unsigned const /*errorsSpent*/)
+    auto delegate = [&matches](TBiIter it, TNeedle const & /*needle*/, unsigned const /*errorsSpent*/)
     {
+        uint32_t const len = static_cast<uint32_t>(repLength(it));
         for (auto const & occ : getOccurrences(it))
-            occurrences.push_back(occ);
+            matches.push_back(EditMatch<TLocation>{occ, len});
     };
 
     auto scheme = OptimalSearchSchemesEdit<errors>::VALUE;
@@ -509,8 +520,64 @@ inline void collectEditOccurrences(TIndex & index, TNeedle const & needle, std::
     TBiIter it(index);
     _optimalSearchSchemeGM(delegate, it, needle, scheme, EditDistance());
 
-    std::sort(occurrences.begin(), occurrences.end());
-    occurrences.erase(std::unique(occurrences.begin(), occurrences.end()), occurrences.end());
+    std::sort(matches.begin(), matches.end(), [](EditMatch<TLocation> const & a, EditMatch<TLocation> const & b)
+    {
+        if (a.location.i1 != b.location.i1)
+            return a.location.i1 < b.location.i1;
+        if (a.location.i2 != b.location.i2)
+            return a.location.i2 < b.location.i2;
+        return a.length < b.length;
+    });
+    matches.erase(std::unique(matches.begin(), matches.end(), [](EditMatch<TLocation> const & a, EditMatch<TLocation> const & b)
+    {
+        return a.location.i1 == b.location.i1 && a.location.i2 == b.location.i2 && a.length == b.length;
+    }), matches.end());
+}
+
+template <typename TLocation>
+inline void selectDistinctStarts(std::vector<EditMatch<TLocation>> const & matches, std::vector<TLocation> & selected)
+{
+    selected.clear();
+    for (auto const & match : matches)
+    {
+        if (selected.empty() || selected.back().i1 != match.location.i1 || selected.back().i2 != match.location.i2)
+            selected.push_back(match.location);
+    }
+}
+
+// Largest set of matches whose half-open text intervals do not overlap.
+// Matches on different sequences never overlap. Sorting by end position makes
+// the greedy scan optimal.
+template <typename TLocation>
+inline void selectNonOverlapping(std::vector<EditMatch<TLocation>> & matches, std::vector<TLocation> & selected)
+{
+    std::sort(matches.begin(), matches.end(), [](EditMatch<TLocation> const & a, EditMatch<TLocation> const & b)
+    {
+        if (a.location.i1 != b.location.i1)
+            return a.location.i1 < b.location.i1;
+        uint64_t const aEnd = static_cast<uint64_t>(a.location.i2) + a.length;
+        uint64_t const bEnd = static_cast<uint64_t>(b.location.i2) + b.length;
+        if (aEnd != bEnd)
+            return aEnd < bEnd;
+        return a.location.i2 < b.location.i2;
+    });
+
+    selected.clear();
+    bool have = false;
+    typename std::remove_reference<decltype(std::declval<TLocation>().i1)>::type lastSeq{};
+    uint64_t lastEnd = 0;
+    for (auto const & match : matches)
+    {
+        uint64_t const start = static_cast<uint64_t>(match.location.i2);
+        uint64_t const end = start + match.length;
+        if (!have || match.location.i1 != lastSeq || start >= lastEnd)
+        {
+            selected.push_back(match.location);
+            have = true;
+            lastSeq = match.location.i1;
+            lastEnd = end;
+        }
+    }
 }
 
 template <unsigned errors, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping>
@@ -541,14 +608,27 @@ inline void computeMappabilityEdit(TIndex & index, TText const & text, TContaine
             return;
 
         auto const needle = infix(text, pos, pos + params.length);
-        std::vector<TLocation> forwardOccs;
-        std::vector<TLocation> reverseOccs;
-        collectEditOccurrences<errors>(index, needle, forwardOccs);
+        std::vector<EditMatch<TLocation>> forwardMatches;
+        std::vector<EditMatch<TLocation>> reverseMatches;
+        collectEditMatches<errors>(index, needle, forwardMatches);
 
         if (params.revCompl)
         {
             ModRevCompl<typename std::remove_reference<decltype(needle)>::type> needleRevCompl(needle);
-            collectEditOccurrences<errors>(index, needleRevCompl, reverseOccs);
+            collectEditMatches<errors>(index, needleRevCompl, reverseMatches);
+        }
+
+        std::vector<TLocation> forwardOccs;
+        std::vector<TLocation> reverseOccs;
+        if (params.nonOverlapping)
+        {
+            selectNonOverlapping(forwardMatches, forwardOccs);
+            selectNonOverlapping(reverseMatches, reverseOccs);
+        }
+        else
+        {
+            selectDistinctStarts(forwardMatches, forwardOccs);
+            selectDistinctStarts(reverseMatches, reverseOccs);
         }
 
         uint64_t hits = 0;

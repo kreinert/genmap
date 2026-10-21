@@ -539,7 +539,7 @@ int mappabilityMain(int argc, char const ** argv)
     ArgumentParser parser("GenMap map");
     sharedSetup(parser);
     addDescription(parser,
-        "Tool for computing the mappability/frequency on nucleotide sequences. It supports multi-fasta files with DNA or RNA alphabets (A, C, G, T/U, N). Frequency is the absolute number of occurrences, mappability is the inverse, i.e., 1 / frequency-value. By default occurrences are counted with Hamming distance. --edit-distance counts distinct start positions within Levenshtein distance E.");
+        "Tool for computing the mappability/frequency on nucleotide sequences. It supports multi-fasta files with DNA or RNA alphabets (A, C, G, T/U, N). Frequency is the absolute number of occurrences, mappability is the inverse, i.e., 1 / frequency-value. By default occurrences are counted with Hamming distance. --edit-distance counts distinct start positions within Levenshtein distance E. --non-overlapping keeps one match from each set of overlapping edit alignments.");
 
     addOption(parser, ArgParseOption("I", "index", "Path to the index", ArgParseArgument::INPUT_FILE, "IN"));
 	setRequired(parser, "index");
@@ -553,6 +553,10 @@ int mappabilityMain(int argc, char const ** argv)
         "Use edit distance (mismatches, insertions, and deletions) instead of Hamming distance. "
         "A hit is one distinct start position of a matching substring. "
         "K must be at least 1, 2, 4, 5, or 6 for E = 0, 1, 2, 3, or 4."));
+
+    addOption(parser, ArgParseOption("nv", "non-overlapping",
+        "With --edit-distance, count a largest set of non-overlapping matches. "
+        "Overlapping alignments of the same site, including the one-base shift from a single insertion or deletion, count once."));
 
     addOption(parser, ArgParseOption("K", "length", "Length of k-mers", ArgParseArgument::INTEGER, "INT"));
     setRequired(parser, "length");
@@ -634,6 +638,12 @@ int mappabilityMain(int argc, char const ** argv)
     SearchParams searchParams;
     getOptionValue(opt.errors, parser, "errors");
     opt.editDistance = isSet(parser, "edit-distance");
+    searchParams.nonOverlapping = isSet(parser, "non-overlapping");
+    if (searchParams.nonOverlapping && !opt.editDistance)
+    {
+        std::cerr << "ERROR: --non-overlapping requires --edit-distance.\n";
+        return ArgumentParser::PARSE_ERROR;
+    }
     getOptionValue(opt.indexPath, parser, "index");
     getOptionValue(opt.outputPath, parser, "output");
     if (isSet(parser, "selection"))

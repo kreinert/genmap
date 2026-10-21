@@ -88,6 +88,9 @@ struct SearchParams
     unsigned threads;
     bool revCompl;
     bool excludePseudo;
+    // Edit distance only. Count a largest set of matches whose text intervals
+    // do not overlap, instead of every distinct start position.
+    bool nonOverlapping = false;
 };
 
 std::string mytime()
