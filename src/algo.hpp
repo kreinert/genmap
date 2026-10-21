@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <set>
+#include <vector>
+
 #include "find2_index_approx.hpp"
 
 using namespace seqan;
@@ -480,4 +484,214 @@ inline void computeMappability(TIndex & index, TText const & text, TContainer & 
     // At the end we overwrite the frequency of those k-mers with 0.
     // TODO: k-mers spanning two strings should not be searched if there are many short strings (i.e., fasta of reads).
     resetLimits(c, params.length, chromCumLengths);
+}
+
+// Edit-distance mappability. The Hamming algorithm extends one shared overlap
+// across several adjacent k-mers; an indel changes the matched length, so that
+// extension does not apply. Each k-mer is searched with an optimum search scheme
+// for Levenshtein distance. Several alignments can share a start position, so the
+// frequency is the number of distinct start positions (forward strand plus reverse
+// complement), not the sum of suffix-array interval sizes.
+template <unsigned errors, typename TIndex, typename TNeedle, typename TLocation>
+inline void collectEditOccurrences(TIndex & index, TNeedle const & needle, std::vector<TLocation> & occurrences)
+{
+    occurrences.clear();
+
+    using TBiIter = Iter<TIndex, VSTree<TopDown<> > >;
+    auto delegate = [&occurrences](TBiIter it, TNeedle const & /*needle*/, unsigned const /*errorsSpent*/)
+    {
+        for (auto const & occ : getOccurrences(it))
+            occurrences.push_back(occ);
+    };
+
+    auto scheme = OptimalSearchSchemesEdit<errors>::VALUE;
+    _optimalSearchSchemeComputeFixedBlocklengthGM(scheme, length(needle));
+    TBiIter it(index);
+    _optimalSearchSchemeGM(delegate, it, needle, scheme, EditDistance());
+
+    std::sort(occurrences.begin(), occurrences.end());
+    occurrences.erase(std::unique(occurrences.begin(), occurrences.end()), occurrences.end());
+}
+
+template <unsigned errors, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping>
+inline void computeMappabilityEdit(TIndex & index, TText const & text, TContainer & c, SearchParams const & params,
+                                   bool const directory, TChromosomeLengths const & chromLengths, TChromosomeLengths const & chromCumLengths, TLocations & locations,
+                                   TMapping const & mappingSeqIdFile, std::vector<std::pair<uint64_t, uint64_t>> const & intervals,
+                                   bool & completeSameKmers,
+                                   uint64_t const currentFileNo, uint64_t const totalFileNo, bool const csvComputation)
+{
+    using TValue = typename TContainer::value_type;
+    using TLocation = typename TLocations::key_type;
+    constexpr uint64_t max_val = std::numeric_limits<TValue>::max();
+
+    auto const & limits = stringSetLimits(indexText(index));
+    uint64_t const textLength = length(text);
+    if (textLength < params.length)
+    {
+        resetLimits(c, params.length, chromCumLengths);
+        return;
+    }
+
+    uint64_t const numberOfKmers = textLength - params.length + 1;
+    completeSameKmers = false;
+
+    auto const searchPosition = [&](uint64_t const pos)
+    {
+        if (c[pos] != 0)
+            return;
+
+        auto const needle = infix(text, pos, pos + params.length);
+        std::vector<TLocation> forwardOccs;
+        std::vector<TLocation> reverseOccs;
+        collectEditOccurrences<errors>(index, needle, forwardOccs);
+
+        if (params.revCompl)
+        {
+            ModRevCompl<typename std::remove_reference<decltype(needle)>::type> needleRevCompl(needle);
+            collectEditOccurrences<errors>(index, needleRevCompl, reverseOccs);
+        }
+
+        uint64_t hits = 0;
+        if (params.excludePseudo)
+        {
+            std::set<typename Value<TLocation, 1>::Type> distinctSequences;
+            for (auto const & location : forwardOccs)
+                distinctSequences.emplace(mappingSeqIdFile[location.i1]);
+            for (auto const & location : reverseOccs)
+                distinctSequences.emplace(mappingSeqIdFile[location.i1]);
+            hits = distinctSequences.size();
+        }
+        else
+        {
+            hits = forwardOccs.size() + reverseOccs.size();
+        }
+        hits = std::min(hits, max_val);
+
+        if (csvComputation)
+        {
+            using TEntry = std::pair<TLocation, std::pair<std::vector<TLocation>, std::vector<TLocation>>>;
+            TEntry entry;
+            entry.second.first = forwardOccs;
+            entry.second.second = reverseOccs;
+
+            Iter<TIndex, VSTree<TopDown<> > > exactIt(index);
+            bool const exact = goDown(exactIt, needle, Rev());
+            bool const propagated = !directory && (intervals.empty() || completeSameKmers) && exact && countOccurrences(exactIt) > 1;
+            if (propagated)
+            {
+                for (auto const & exactOcc : getOccurrences(exactIt))
+                {
+                    if (static_cast<int64_t>(exactOcc.i2) <= static_cast<int64_t>(chromLengths[exactOcc.i1]) - params.length)
+                    {
+                        #pragma omp critical
+                        locations.emplace(exactOcc, entry.second);
+                    }
+                    auto const occPos = posGlobalize(exactOcc, limits);
+                    if (occPos < c.size())
+                        c[occPos] = static_cast<TValue>(hits);
+                }
+            }
+            else if (forwardOccs.size() + reverseOccs.size() > 0)
+            {
+                myPosLocalize(entry.first, pos, chromCumLengths);
+                if (static_cast<int64_t>(entry.first.i2) <= static_cast<int64_t>(chromLengths[entry.first.i1]) - params.length)
+                {
+                    #pragma omp critical
+                    locations.emplace(entry);
+                }
+                c[pos] = static_cast<TValue>(hits);
+            }
+            else
+            {
+                c[pos] = static_cast<TValue>(hits);
+            }
+        }
+        else if (!directory && (intervals.empty() || completeSameKmers))
+        {
+            Iter<TIndex, VSTree<TopDown<> > > exactIt(index);
+            if (goDown(exactIt, needle, Rev()) && countOccurrences(exactIt) > 1)
+            {
+                for (auto const & exactOcc : getOccurrences(exactIt))
+                {
+                    auto const occPos = posGlobalize(exactOcc, limits);
+                    if (occPos < c.size())
+                        c[occPos] = static_cast<TValue>(hits);
+                }
+            }
+            else
+            {
+                c[pos] = static_cast<TValue>(hits);
+            }
+        }
+        else
+        {
+            c[pos] = static_cast<TValue>(hits);
+        }
+    };
+
+    if (intervals.empty())
+    {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wunused"
+        uint64_t const chunkSize = std::max<uint64_t>(1, numberOfKmers / (params.threads * 50));
+        #pragma clang diagnostic pop
+
+        uint64_t progressCount, progressMax, progressStep;
+        initProgress<outputProgress>(progressCount, progressStep, progressMax, 1, numberOfKmers);
+
+        #pragma omp parallel for schedule(dynamic, chunkSize) num_threads(params.threads)
+        for (uint64_t i = 0; i < numberOfKmers; ++i)
+        {
+            searchPosition(i);
+            printProgress<outputProgress>(progressCount, progressStep, progressMax, currentFileNo, totalFileNo);
+        }
+    }
+    else
+    {
+        uint64_t intervalSum = 0;
+        std::vector<uint64_t> positions;
+        for (auto const & interval : intervals)
+        {
+            intervalSum += interval.second - interval.first;
+            for (uint64_t i = interval.first; i < interval.second && i < numberOfKmers; ++i)
+                positions.push_back(i);
+        }
+
+        float const fraction = static_cast<float>(intervalSum) / textLength;
+        completeSameKmers = fraction > 0.5f;
+
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Wunused"
+        uint64_t const chunkSize = std::max<uint64_t>(1, positions.size() / (params.threads * 50));
+        #pragma clang diagnostic pop
+
+        uint64_t progressCount, progressMax, progressStep;
+        initProgress<outputProgress>(progressCount, progressStep, progressMax, 1, positions.size());
+
+        #pragma omp parallel for schedule(dynamic, chunkSize) num_threads(params.threads)
+        for (uint64_t n = 0; n < positions.size(); ++n)
+        {
+            searchPosition(positions[n]);
+            printProgress<outputProgress>(progressCount, progressStep, progressMax, currentFileNo, totalFileNo);
+        }
+    }
+
+    resetLimits(c, params.length, chromCumLengths);
+}
+
+template <typename TDistance, unsigned errors, typename TIndex, typename TText, typename TContainer, typename TChromosomeLengths, typename TLocations, typename TMapping>
+inline void dispatchMappability(TIndex & index, TText const & text, TContainer & c, SearchParams const & params,
+                                bool const directory, TChromosomeLengths const & chromLengths, TChromosomeLengths const & chromCumLengths, TLocations & locations,
+                                TMapping const & mappingSeqIdFile, std::vector<std::pair<uint64_t, uint64_t>> const & intervals,
+                                bool & completeSameKmers,
+                                uint64_t const currentFileNo, uint64_t const totalFileNo, bool const csvComputation)
+{
+    if (std::is_same<TDistance, EditDistance>::value)
+    {
+        computeMappabilityEdit<errors>(index, text, c, params, directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+    }
+    else
+    {
+        computeMappability<errors>(index, text, c, params, directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+    }
 }

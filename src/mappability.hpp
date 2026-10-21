@@ -41,6 +41,7 @@ struct Options
     uint32_t maxSeqLengthWidth;
     uint32_t totalLengthWidth;
     unsigned errors;
+    bool editDistance;
     unsigned sampling;
     uint64_t designWindowSize;
     float designPercentageRare;
@@ -207,15 +208,15 @@ inline void run(TIndex & index, TText const & text, Options const & opt, SearchP
 
     switch (opt.errors)
     {
-        case 0:  computeMappability<0>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+        case 0:  dispatchMappability<TDistance, 0>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
                  break;
-        case 1:  computeMappability<1>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+        case 1:  dispatchMappability<TDistance, 1>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
                  break;
-        case 2:  computeMappability<2>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+        case 2:  dispatchMappability<TDistance, 2>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
                  break;
-        case 3:  computeMappability<3>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+        case 3:  dispatchMappability<TDistance, 3>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
                  break;
-        case 4:  computeMappability<4>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
+        case 4:  dispatchMappability<TDistance, 4>(index, text, c, searchParams, opt.directory, chromLengths, chromCumLengths, locations, mappingSeqIdFile, intervals, completeSameKmers, currentFileNo, totalFileNo, csvComputation);
                  break;
         default: std::cerr << "E > 4 not yet supported.\n";
                  exit(1);
@@ -522,7 +523,10 @@ inline void run(Options const & opt, SearchParams const & searchParams)
 //    if (opt.mmap && opt.packed_text)
 //        run<TChar, Packed<MMap<> >, HammingDistance>(opt, searchParams);
 //    else if (!opt.mmap && opt.packed_text)
-        run<TChar, Packed<Alloc<> >, HammingDistance>(opt, searchParams);
+        if (opt.editDistance)
+            run<TChar, Packed<Alloc<> >, EditDistance>(opt, searchParams);
+        else
+            run<TChar, Packed<Alloc<> >, HammingDistance>(opt, searchParams);
 //    else if (opt.mmap && !opt.packed_text)
 //        run<TChar, MMap<>, HammingDistance>(opt, searchParams);
 //    else // if (!opt.mmap && !opt.packed_text)
@@ -535,7 +539,7 @@ int mappabilityMain(int argc, char const ** argv)
     ArgumentParser parser("GenMap map");
     sharedSetup(parser);
     addDescription(parser,
-        "Tool for computing the mappability/frequency on nucleotide sequences. It supports multi-fasta files with DNA or RNA alphabets (A, C, G, T/U, N). Frequency is the absolute number of occurrences, mappability is the inverse, i.e., 1 / frequency-value.");
+        "Tool for computing the mappability/frequency on nucleotide sequences. It supports multi-fasta files with DNA or RNA alphabets (A, C, G, T/U, N). Frequency is the absolute number of occurrences, mappability is the inverse, i.e., 1 / frequency-value. By default occurrences are counted with Hamming distance. --edit-distance counts distinct start positions within Levenshtein distance E.");
 
     addOption(parser, ArgParseOption("I", "index", "Path to the index", ArgParseArgument::INPUT_FILE, "IN"));
 	setRequired(parser, "index");
@@ -544,6 +548,11 @@ int mappabilityMain(int argc, char const ** argv)
     setRequired(parser, "output");
 
     addOption(parser, ArgParseOption("E", "errors", "Number of errors", ArgParseArgument::INTEGER, "INT"));
+
+    addOption(parser, ArgParseOption("ed", "edit-distance",
+        "Use edit distance (mismatches, insertions, and deletions) instead of Hamming distance. "
+        "A hit is one distinct start position of a matching substring. "
+        "K must be at least 1, 2, 4, 5, or 6 for E = 0, 1, 2, 3, or 4."));
 
     addOption(parser, ArgParseOption("K", "length", "Length of k-mers", ArgParseArgument::INTEGER, "INT"));
     setRequired(parser, "length");
@@ -624,6 +633,7 @@ int mappabilityMain(int argc, char const ** argv)
     Options opt;
     SearchParams searchParams;
     getOptionValue(opt.errors, parser, "errors");
+    opt.editDistance = isSet(parser, "edit-distance");
     getOptionValue(opt.indexPath, parser, "index");
     getOptionValue(opt.outputPath, parser, "output");
     if (isSet(parser, "selection"))
@@ -676,30 +686,51 @@ int mappabilityMain(int argc, char const ** argv)
 
     // store in temporary variables to avoid parsing arguments twice
     bool const isSetOverlap = isSet(parser, "overlap");
-    if (isSetOverlap)
-        getOptionValue(searchParams.overlap, parser, "overlap");
-    else if (opt.errors == 0)
-        searchParams.overlap = searchParams.length * 0.7;
-    else
-        searchParams.overlap = searchParams.length * std::min(std::max(searchParams.length, 30u), 100u) * pow(0.7f, opt.errors) / 100.0;
-
-    // (K - O >= E + 2 must hold since common overlap has length K - O and will be split into E + 2 parts)
-    uint64_t const maxPossibleOverlap = std::min(searchParams.length - 1, searchParams.length - opt.errors - 2);
-    if (searchParams.overlap > maxPossibleOverlap)
+    if (opt.editDistance)
     {
-        if (!isSetOverlap)
+        if (opt.errors > 4)
         {
-            searchParams.overlap = maxPossibleOverlap;
-        }
-        else
-        {
-            std::cerr << "ERROR: overlap cannot be larger than min(K - 1, K - E - 2) = " << maxPossibleOverlap << ".\n";
+            std::cerr << "E > 4 not yet supported.\n";
             return ArgumentParser::PARSE_ERROR;
         }
+        unsigned const minK = editDistanceMinKmerLength(opt.errors);
+        if (searchParams.length < minK)
+        {
+            std::cerr << "ERROR: Edit distance with E = " << opt.errors
+                      << " needs K >= " << minK
+                      << " so that every search-scheme block is non-empty.\n";
+            return ArgumentParser::PARSE_ERROR;
+        }
+        // The overlap is only used by the Hamming sliding-window search.
+        searchParams.overlap = 0;
     }
+    else
+    {
+        if (isSetOverlap)
+            getOptionValue(searchParams.overlap, parser, "overlap");
+        else if (opt.errors == 0)
+            searchParams.overlap = searchParams.length * 0.7;
+        else
+            searchParams.overlap = searchParams.length * std::min(std::max(searchParams.length, 30u), 100u) * pow(0.7f, opt.errors) / 100.0;
 
-    // searchParams.overlap = length of common overlap
-    searchParams.overlap = searchParams.length - searchParams.overlap;
+        // (K - O >= E + 2 must hold since common overlap has length K - O and will be split into E + 2 parts)
+        uint64_t const maxPossibleOverlap = std::min(searchParams.length - 1, searchParams.length - opt.errors - 2);
+        if (searchParams.overlap > maxPossibleOverlap)
+        {
+            if (!isSetOverlap)
+            {
+                searchParams.overlap = maxPossibleOverlap;
+            }
+            else
+            {
+                std::cerr << "ERROR: overlap cannot be larger than min(K - 1, K - E - 2) = " << maxPossibleOverlap << ".\n";
+                return ArgumentParser::PARSE_ERROR;
+            }
+        }
+
+        // searchParams.overlap = length of common overlap
+        searchParams.overlap = searchParams.length - searchParams.overlap;
+    }
 
     // TODO: error message if output files already exist or directory is not writeable
     // TODO: nice error messages if index is incorrect or doesnt exist

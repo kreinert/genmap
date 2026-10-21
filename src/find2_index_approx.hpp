@@ -133,6 +133,87 @@ struct OptimalSearchSchemesGM<4, TVoidType>
 template <typename TVoidType>
 constexpr std::array<OptimalSearchGM<6>, 7> OptimalSearchSchemesGM<4, TVoidType>::VALUE;
 
+// Optimum search schemes for full-read edit distance. These are SeqAn's
+// OptimalSearchSchemes<0, e>, which are valid for Levenshtein distance.
+// The GenMap schemes above differ for e >= 3 and are only used with the
+// Hamming sliding-window algorithm.
+template <size_t max, typename TVoidType = void>
+struct OptimalSearchSchemesEdit;
+
+inline unsigned editDistanceMinKmerLength(unsigned const errors)
+{
+    // One non-empty block per search-scheme part.
+    constexpr unsigned blocks[] = {1u, 2u, 4u, 5u, 6u};
+    return errors < 5u ? blocks[errors] : 0u;
+}
+
+template <typename TVoidType>
+struct OptimalSearchSchemesEdit<0, TVoidType>
+{
+    static constexpr std::array<OptimalSearchGM<1>, 1> VALUE { {{ {{1}}, {{0}}, {{0}}, {{0}}, 0 }} };
+};
+
+template <typename TVoidType>
+constexpr std::array<OptimalSearchGM<1>, 1> OptimalSearchSchemesEdit<0, TVoidType>::VALUE;
+
+template <typename TVoidType>
+struct OptimalSearchSchemesEdit<1, TVoidType>
+{
+    static constexpr std::array<OptimalSearchGM<2>, 2> VALUE
+    {{
+        { {{1, 2}}, {{0, 0}}, {{0, 1}}, {{0, 0}}, 0 },
+        { {{2, 1}}, {{0, 1}}, {{0, 1}}, {{0, 0}}, 0 }
+    }};
+};
+
+template <typename TVoidType>
+constexpr std::array<OptimalSearchGM<2>, 2> OptimalSearchSchemesEdit<1, TVoidType>::VALUE;
+
+template <typename TVoidType>
+struct OptimalSearchSchemesEdit<2, TVoidType>
+{
+    static constexpr std::array<OptimalSearchGM<4>, 3> VALUE
+    {{
+        { {{1, 2, 3, 4}}, {{0, 0, 1, 1}}, {{0, 0, 2, 2}}, {{0, 0, 0, 0}}, 0 },
+        { {{3, 2, 1, 4}}, {{0, 0, 0, 0}}, {{0, 1, 1, 2}}, {{0, 0, 0, 0}}, 0 },
+        { {{4, 3, 2, 1}}, {{0, 0, 0, 2}}, {{0, 1, 2, 2}}, {{0, 0, 0, 0}}, 0 }
+    }};
+};
+
+template <typename TVoidType>
+constexpr std::array<OptimalSearchGM<4>, 3> OptimalSearchSchemesEdit<2, TVoidType>::VALUE;
+
+template <typename TVoidType>
+struct OptimalSearchSchemesEdit<3, TVoidType>
+{
+    static constexpr std::array<OptimalSearchGM<5>, 4> VALUE
+    {{
+        { {{1, 2, 3, 4, 5}}, {{0, 0, 0, 0, 3}}, {{0, 2, 2, 3, 3}}, {{0, 0, 0, 0, 0}}, 0 },
+        { {{2, 3, 4, 5, 1}}, {{0, 0, 0, 2, 2}}, {{0, 1, 2, 2, 3}}, {{0, 0, 0, 0, 0}}, 0 },
+        { {{3, 4, 5, 2, 1}}, {{0, 0, 1, 1, 1}}, {{0, 1, 1, 2, 3}}, {{0, 0, 0, 0, 0}}, 0 },
+        { {{5, 4, 3, 2, 1}}, {{0, 0, 0, 0, 0}}, {{0, 0, 3, 3, 3}}, {{0, 0, 0, 0, 0}}, 0 }
+    }};
+};
+
+template <typename TVoidType>
+constexpr std::array<OptimalSearchGM<5>, 4> OptimalSearchSchemesEdit<3, TVoidType>::VALUE;
+
+template <typename TVoidType>
+struct OptimalSearchSchemesEdit<4, TVoidType>
+{
+    static constexpr std::array<OptimalSearchGM<6>, 5> VALUE
+    {{
+        { {{1, 2, 3, 4, 5, 6}}, {{0, 0, 0, 0, 0, 4}}, {{0, 3, 3, 3, 4, 4}}, {{0, 0, 0, 0, 0, 0}}, 0 },
+        { {{2, 3, 4, 5, 6, 1}}, {{0, 0, 0, 0, 0, 0}}, {{0, 2, 2, 3, 3, 4}}, {{0, 0, 0, 0, 0, 0}}, 0 },
+        { {{3, 2, 4, 5, 6, 1}}, {{0, 1, 1, 1, 1, 1}}, {{0, 2, 2, 3, 3, 4}}, {{0, 0, 0, 0, 0, 0}}, 0 },
+        { {{4, 3, 2, 5, 6, 1}}, {{0, 1, 2, 2, 2, 2}}, {{0, 1, 2, 3, 3, 4}}, {{0, 0, 0, 0, 0, 0}}, 0 },
+        { {{6, 5, 4, 3, 2, 1}}, {{0, 0, 0, 0, 3, 3}}, {{0, 0, 4, 4, 4, 4}}, {{0, 0, 0, 0, 0, 0}}, 0 }
+    }};
+};
+
+template <typename TVoidType>
+constexpr std::array<OptimalSearchGM<6>, 5> OptimalSearchSchemesEdit<4, TVoidType>::VALUE;
+
 // Given the blocklengths (absolute, not cumulative values), assign it to all
 // OptimalSearches in a OptimalSearchScheme. The order of blocklength has to be from left to
 // right (regarding blocks)
